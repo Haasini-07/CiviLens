@@ -222,23 +222,8 @@ The demo showcases the CiviLens concept and prototype.
 ## 🌐 Working Prototype
 
 **Live Demo:**
-*Add the publicly accessible deployed demo URL here.*
+https://resilient-beignet-b8d63f.netlify.app/
 
----
-
-## 📸 Screenshots
-
-Add screenshots of the CiviLens prototype here to demonstrate the main user experience.
-
-Recommended screenshots:
-
-1. CiviLens landing page
-2. Citizen query input
-3. Department / PIO recommendation
-4. Transparency analytics
-5. RTI draft assistant
-6. Deadline tracker
-7. Appeal guidance
 
 ---
 
@@ -295,9 +280,11 @@ The project references publicly available information and resources related to t
 
 ## 👥 Team
 
-**Team:** Code Excel
+**Team:** CodeExcel
 **College:** SRMIST, Ramapuram
 **Team Leader:** Krishnaa A R
+**Team Member:** Haasini P G
+
 
 ---
 
