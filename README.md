@@ -307,7 +307,7 @@ The project references publicly available information and resources related to t
 | ------------------------ | -------------------------------------- |
 | 💻 GitHub                | https://github.com/Haasini-07/CiviLens |
 | ▶️ YouTube Demo          | https://youtu.be/p2ZYZaUlq00           |
-| 🌐 Working Demo          | *Add deployed URL*                     |
+| 🌐 Working Demo          | https://resilient-beignet-b8d63f.netlify.app/                    |
 | 📄 Project Documentation | *Add documentation URL*                |
 
 ---
