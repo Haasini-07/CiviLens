@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.env
+backend/.venv/
+backend/__pycache__/
+backend/*.pyc
+backend/civilens.db
+backend/civilens.db-shm
+backend/civilens.db-wal
