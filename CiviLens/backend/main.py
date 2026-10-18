@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from fastapi.responses import FileResponse
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -89,6 +89,11 @@ def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def like(term: str) -> str:
+    """Build a LIKE pattern that treats user input literally (escapes % and _)."""
+    return "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
 def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
 
@@ -156,8 +161,35 @@ class RTIInput(BaseModel):
     notes: str = Field(default="", max_length=5000)
     reply_text: str = Field(default="", max_length=20000)
 
+    @field_validator("filed_date", "follow_up_date")
+    @classmethod
+    def valid_iso_date(cls, value: str) -> str:
+        value = (value or "").strip()
+        if value:
+            try:
+                parsed = date.fromisoformat(value)
+                if parsed.isoformat() != value:
+                    raise ValueError
+            except ValueError:
+                raise ValueError("Dates must be valid and in YYYY-MM-DD format")
+        return value
+
+    @field_validator("applicant_name", "subject", "public_authority")
+    @classmethod
+    def not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("This field cannot be blank")
+        return value.strip()
+
 class ReplyInput(BaseModel):
     reply_text: str = Field(min_length=5, max_length=20000)
+
+def check_rti(payload: "RTIInput") -> None:
+    if payload.status not in STATUSES:
+        raise HTTPException(status_code=422, detail=f"Status must be one of: {', '.join(sorted(STATUSES))}")
+    if payload.filed_date and payload.follow_up_date and payload.follow_up_date < payload.filed_date:
+        raise HTTPException(status_code=422, detail="Follow-up date cannot be before the filed date")
+
 
 STATUSES = {"Preparing", "Ready to submit", "Filed", "Acknowledged", "Reply Received", "First Appeal", "Closed"}
 
@@ -326,7 +358,7 @@ def generate_draft(payload: GenerateDraftInput) -> dict[str, Any]:
 @app.get("/api/drafts")
 def list_drafts(search: str = Query(default="", max_length=200)) -> list[dict[str, Any]]:
     with connect() as db:
-        rows = db.execute("SELECT * FROM drafts WHERE title LIKE ? OR applicant_name LIKE ? OR department_name LIKE ? ORDER BY updated_at DESC", tuple([f"%{search}%"] * 3)).fetchall()
+        rows = db.execute("SELECT * FROM drafts WHERE title LIKE ? ESCAPE '\\' OR applicant_name LIKE ? ESCAPE '\\' OR department_name LIKE ? ESCAPE '\\' ORDER BY updated_at DESC", tuple([like(search)] * 3)).fetchall()
     return [row_dict(r) for r in rows]
 
 @app.post("/api/drafts", status_code=201)
@@ -369,12 +401,12 @@ def delete_draft(draft_id: str) -> dict[str, bool]:
 @app.get("/api/rtis")
 def list_rtis(search: str = Query(default="", max_length=200)) -> list[dict[str, Any]]:
     with connect() as db:
-        rows = db.execute("SELECT * FROM rti_records WHERE subject LIKE ? OR applicant_name LIKE ? OR public_authority LIKE ? OR reference_number LIKE ? ORDER BY updated_at DESC", tuple([f"%{search}%"] * 4)).fetchall()
+        rows = db.execute("SELECT * FROM rti_records WHERE subject LIKE ? ESCAPE '\\' OR applicant_name LIKE ? ESCAPE '\\' OR public_authority LIKE ? ESCAPE '\\' OR reference_number LIKE ? ESCAPE '\\' ORDER BY updated_at DESC", tuple([like(search)] * 4)).fetchall()
     return [row_dict(r) for r in rows]
 
 @app.post("/api/rtis", status_code=201)
 def create_rti(payload: RTIInput) -> dict[str, Any]:
-    if payload.status not in STATUSES: raise HTTPException(status_code=422, detail=f"Status must be one of: {', '.join(sorted(STATUSES))}")
+    check_rti(payload)
     id_ = "RTI-" + uuid.uuid4().hex[:8].upper()
     ts = now_iso()
     with connect() as db:
@@ -391,12 +423,12 @@ def get_rti(rti_id: str) -> dict[str, Any]:
 
 @app.put("/api/rtis/{rti_id}")
 def update_rti(rti_id: str, payload: RTIInput) -> dict[str, Any]:
-    if payload.status not in STATUSES: raise HTTPException(status_code=422, detail=f"Status must be one of: {', '.join(sorted(STATUSES))}")
+    check_rti(payload)
     ts = now_iso()
     with connect() as db:
         exists = db.execute("SELECT id FROM rti_records WHERE id=?", (rti_id,)).fetchone()
         if not exists: raise HTTPException(status_code=404, detail="RTI record not found")
-        follow_up_date = calculated_rti_follow_up(payload.filed_date, payload.follow_up_date)
+        follow_up_date = payload.follow_up_date  # keep only user-entered dates; reminders are derived in the UI
         db.execute("UPDATE rti_records SET applicant_name=?,subject=?,public_authority=?,department_id=?,filed_date=?,follow_up_date=?,reference_number=?,status=?,notes=?,reply_text=?,updated_at=? WHERE id=?", (payload.applicant_name,payload.subject,payload.public_authority,payload.department_id,payload.filed_date,follow_up_date,payload.reference_number,payload.status,payload.notes,payload.reply_text,ts,rti_id))
         db.execute("INSERT INTO activity_events(event_type,record_id,description,created_at) VALUES(?,?,?,?)", ("rti_updated", rti_id, f"RTI record updated: {payload.subject}", ts))
         row = db.execute("SELECT * FROM rti_records WHERE id=?", (rti_id,)).fetchone()
@@ -404,8 +436,13 @@ def update_rti(rti_id: str, payload: RTIInput) -> dict[str, Any]:
 
 @app.delete("/api/rtis/{rti_id}")
 def delete_rti(rti_id: str) -> dict[str, bool]:
-    with connect() as db: cur = db.execute("DELETE FROM rti_records WHERE id=?", (rti_id,))
+    with connect() as db:
+        stored = [r["stored_name"] for r in db.execute("SELECT stored_name FROM attachments WHERE rti_id=?", (rti_id,)).fetchall()]
+        cur = db.execute("DELETE FROM rti_records WHERE id=?", (rti_id,))
     if cur.rowcount == 0: raise HTTPException(status_code=404, detail="RTI record not found")
+    for name in stored:  # cascade removed the DB rows; remove the files too
+        try: (UPLOAD_DIR / name).unlink(missing_ok=True)
+        except OSError: pass
     return {"deleted": True}
 
 @app.get("/api/rtis/{rti_id}/attachments")
@@ -495,5 +532,5 @@ def activity() -> dict[str, int]:
         drafts_count = db.execute("SELECT COUNT(*) FROM drafts").fetchone()[0]
         active = db.execute("SELECT COUNT(*) FROM rti_records WHERE status NOT IN ('Closed','Reply Received')").fetchone()[0]
         completed = db.execute("SELECT COUNT(*) FROM rti_records WHERE status IN ('Closed','Reply Received')").fetchone()[0]
-        upcoming = db.execute("SELECT COUNT(*) FROM rti_records WHERE follow_up_date >= ? AND follow_up_date <= ? AND status NOT IN ('Closed','Reply Received')", (date.today().isoformat(), (date.today()+timedelta(days=30)).isoformat())).fetchone()[0]
+        upcoming = db.execute("SELECT COUNT(*) FROM rti_records WHERE COALESCE(NULLIF(follow_up_date,''), CASE WHEN filed_date != '' THEN date(filed_date,'+30 days') END) BETWEEN ? AND ? AND status NOT IN ('Closed','Reply Received')", (date.today().isoformat(), (date.today()+timedelta(days=30)).isoformat())).fetchone()[0]
     return {"active": active, "drafts": drafts_count, "upcoming_deadlines": upcoming, "completed": completed}
